@@ -1,0 +1,41 @@
+# mkdataset 設定ファイル
+
+# ソースディレクトリのパス（CLI引数 --source で上書き可能）
+source_dir = "./source"
+
+# トークナイザー設定
+# HuggingFace モデル名を指定すると正確なトークン数でチャンク分割・統計表示する
+# 未指定の場合は概算（1トークン ≒ 3文字）で処理
+tokenizer = "unsloth/gpt-oss-20b"
+
+# チャンク分割設定（モデルのコンテキストサイズに合わせる）
+# max_tokens を超えるテキストファイルは行単位で分割される
+max_tokens = 8192          # チャンクあたりの最大トークン数（0 = 分割しない）
+chunk_overlap_tokens = 256 # チャンク間のオーバーラップトークン数
+
+# 画像としてテキスト変換する拡張子
+# PILで読み込み、ピクセル配列をPython配列表現に変換してtextカラムに格納
+image_extensions = [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"]
+
+# 除外する拡張子（これらのファイルはデータセットに含めない）
+skip_extensions = [
+    ".wav", ".mp3", ".ogg", ".mp4", ".webm",   # 音声/動画
+    ".map",                                       # ソースマップ
+    ".zip", ".tar", ".gz", ".bz2",               # アーカイブ
+    ".pyc", ".pyo", ".so", ".dll", ".exe", ".wasm",  # コンパイル済み
+    ".ttf", ".woff", ".woff2", ".eot",           # フォント
+    ".ico", ".svg",                               # アイコン/ベクター画像
+]
+
+# 拡張子 -> 言語マッピング（textカラムのヘッダーとmetadata用）
+# ここにない拡張子は "unknown"、拡張子なしは "text" になる
+# 画像拡張子は自動的に "image-data" になるため、ここに書く必要はない
+[language_map]
+".py" = "python"
+".js" = "javascript"
+".ts" = "typescript"
+".json" = "json"
+".md" = "markdown"
+".txt" = "text"
+".frag" = "glsl"
+".vert" = "glsl"
