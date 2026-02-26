@@ -13,6 +13,10 @@ tokenizer = "unsloth/gpt-oss-20b"
 max_tokens = 8192          # チャンクあたりの最大トークン数（0 = 分割しない）
 chunk_overlap_tokens = 256 # チャンク間のオーバーラップトークン数
 
+# 画像の量子化（色数削減）設定
+# 全画像をこの色数以下に減色してパレット形式で出力する
+max_palette_colors = 16
+
 # 画像としてテキスト変換する拡張子
 # PILで読み込み、ピクセル配列をPython配列表現に変換してtextカラムに格納
 image_extensions = [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"]
@@ -25,6 +29,14 @@ skip_extensions = [
     ".pyc", ".pyo", ".so", ".dll", ".exe", ".wasm",  # コンパイル済み
     ".ttf", ".woff", ".woff2", ".eot",           # フォント
     ".ico", ".svg",                               # アイコン/ベクター画像
+    ".d.ts",                                       # TypeScript宣言ファイル（自動生成）
+]
+
+# パスベースの除外パターン（fnmatch glob形式）
+# ** は任意の深さのディレクトリにマッチ、* はファイル名のワイルドカード
+skip_patterns = [
+    "scripts/tsgen/**",          # TypeScript定義生成ツール
+    "**/webpack*.config.js",     # Webpackビルド設定
 ]
 
 # 拡張子 -> 言語マッピング（textカラムのヘッダーとmetadata用）

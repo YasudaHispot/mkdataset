@@ -15,6 +15,7 @@ def tmp_config(tmp_path):
     config_path.write_text(
         """
 source_dir = "./my_source"
+max_palette_colors = 16
 
 image_extensions = [".png", ".jpg"]
 skip_extensions = [".wav", ".mp3", ".map", ".pyc"]
@@ -132,20 +133,189 @@ class TestReadFileSafe:
         assert "caf" in content
 
 
+class TestSanitizeVarname:
+    def test_simple(self):
+        assert mkdataset.sanitize_varname("sprite") == "sprite"
+
+    def test_starts_with_digit(self):
+        result = mkdataset.sanitize_varname("3d_model")
+        assert result == "_3d_model"
+        assert result.isidentifier()
+
+    def test_special_chars(self):
+        result = mkdataset.sanitize_varname("my-image (1)")
+        assert result == "my_image__1_"
+        assert result.isidentifier()
+
+
+class TestGenerateUniqueVarnames:
+    def test_all_unique_stems(self):
+        paths = ["project/sprite.png", "project/icon.png", "project/bg.png"]
+        result = mkdataset.generate_unique_varnames(paths)
+        assert result["project/sprite.png"] == "sprite"
+        assert result["project/icon.png"] == "icon"
+        assert result["project/bg.png"] == "bg"
+
+    def test_duplicate_stems_resolved_by_parent(self):
+        paths = [
+            "game/ghost/blinky/down1.png",
+            "game/ghost/clyde/down1.png",
+            "game/ghost/inky/down1.png",
+        ]
+        result = mkdataset.generate_unique_varnames(paths)
+        assert result["game/ghost/blinky/down1.png"] == "blinky_down1"
+        assert result["game/ghost/clyde/down1.png"] == "clyde_down1"
+        assert result["game/ghost/inky/down1.png"] == "inky_down1"
+
+    def test_needs_two_levels_to_resolve(self):
+        paths = [
+            "a/sub/img.png",
+            "b/sub/img.png",
+        ]
+        result = mkdataset.generate_unique_varnames(paths)
+        assert result["a/sub/img.png"] == "a_sub_img"
+        assert result["b/sub/img.png"] == "b_sub_img"
+
+    def test_mixed_unique_and_duplicate(self):
+        paths = [
+            "project/unique.png",
+            "project/dir_a/icon.png",
+            "project/dir_b/icon.png",
+        ]
+        result = mkdataset.generate_unique_varnames(paths)
+        # unique stays short
+        assert result["project/unique.png"] == "unique"
+        # duplicates get parent prefix
+        assert result["project/dir_a/icon.png"] == "dir_a_icon"
+        assert result["project/dir_b/icon.png"] == "dir_b_icon"
+
+    def test_digit_start_after_resolve(self):
+        paths = [
+            "player/1.png",
+            "death/1.png",
+        ]
+        result = mkdataset.generate_unique_varnames(paths)
+        for varname in result.values():
+            assert varname.isidentifier()
+
+    def test_single_path(self):
+        result = mkdataset.generate_unique_varnames(["top/icon.png"])
+        assert result["top/icon.png"] == "icon"
+
+    def test_empty_list(self):
+        result = mkdataset.generate_unique_varnames([])
+        assert result == {}
+
+    def test_top_level_files(self):
+        paths = ["a.png", "b.png"]
+        result = mkdataset.generate_unique_varnames(paths)
+        assert result["a.png"] == "a"
+        assert result["b.png"] == "b"
+
+
+class TestFormatImageContent:
+    def test_palette_format(self):
+        palette = {0: [255, 0, 0, 255], 1: [0, 255, 0, 255]}
+        pixels = [[0, 1], [1, 0]]
+        varname = "sprite"
+        image_info = {"width": 2, "height": 2, "channels": "RGBA", "num_colors": 2}
+        result = mkdataset.format_image_content(
+            palette, pixels, "project/sprite.png", varname, image_info
+        )
+        assert "# project/sprite.png (2x2, RGBA, 2 colors)" in result
+        assert "sprite_palette = {0: [255, 0, 0, 255], 1: [0, 255, 0, 255]}" in result
+        assert "sprite = [[0, 1], [1, 0]]" in result
+
+    def test_comment_includes_color_count(self):
+        palette = {0: [0, 0, 0, 0]}
+        pixels = [[0]]
+        image_info = {"width": 1, "height": 1, "channels": "RGBA", "num_colors": 1}
+        result = mkdataset.format_image_content(
+            palette, pixels, "icon.png", "icon", image_info
+        )
+        assert "1 colors" in result
+
+
 class TestReadImageAsText:
-    def test_read_image_as_text(self, tmp_path):
+    def test_basic_quantization(self, tmp_path):
         img = Image.new("RGBA", (2, 2), (255, 0, 0, 255))
         img.putpixel((1, 0), (0, 255, 0, 255))
         path = tmp_path / "test.png"
         img.save(path)
 
-        text, info = mkdataset.read_image_as_text(path)
+        palette, pixels, info = mkdataset.read_image_as_text(path, max_colors=16)
         assert info["width"] == 2
         assert info["height"] == 2
         assert info["channels"] == "RGBA"
-        # The text should contain pixel data as a Python list representation
-        assert "[255, 0, 0, 255]" in text
-        assert "[0, 255, 0, 255]" in text
+        assert info["num_colors"] == 2
+        assert len(palette) == 2
+        assert 0 in palette and 1 in palette
+        colors_set = {tuple(v) for v in palette.values()}
+        assert (255, 0, 0, 255) in colors_set
+        assert (0, 255, 0, 255) in colors_set
+        assert len(pixels) == 2
+        assert len(pixels[0]) == 2
+        all_indices = {idx for row in pixels for idx in row}
+        assert all_indices == set(palette.keys())
+
+    def test_transparency_preserved(self, tmp_path):
+        img = Image.new("RGBA", (2, 1), (255, 0, 0, 255))
+        img.putpixel((1, 0), (0, 0, 0, 0))
+        path = tmp_path / "test.png"
+        img.save(path)
+
+        palette, pixels, info = mkdataset.read_image_as_text(path, max_colors=16)
+        has_transparent = any(v[3] == 0 for v in palette.values())
+        assert has_transparent
+
+    def test_max_colors_limits_palette(self, tmp_path):
+        img = Image.new("RGBA", (16, 16))
+        for x in range(16):
+            for y in range(16):
+                img.putpixel((x, y), (x * 16, y * 16, 128, 255))
+        path = tmp_path / "test.png"
+        img.save(path)
+
+        palette, pixels, info = mkdataset.read_image_as_text(path, max_colors=4)
+        assert len(palette) <= 4
+        assert info["num_colors"] <= 4
+
+    def test_fewer_colors_than_max(self, tmp_path):
+        img = Image.new("RGBA", (2, 1), (100, 100, 100, 255))
+        path = tmp_path / "test.png"
+        img.save(path)
+
+        palette, pixels, info = mkdataset.read_image_as_text(path, max_colors=256)
+        assert len(palette) == 1
+        assert info["num_colors"] == 1
+
+    def test_indices_consecutive_from_zero(self, tmp_path):
+        img = Image.new("RGBA", (3, 1), (255, 0, 0, 255))
+        img.putpixel((1, 0), (0, 255, 0, 255))
+        img.putpixel((2, 0), (0, 0, 255, 255))
+        path = tmp_path / "test.png"
+        img.save(path)
+
+        palette, pixels, info = mkdataset.read_image_as_text(path, max_colors=16)
+        assert sorted(palette.keys()) == list(range(len(palette)))
+
+    def test_1x1_image(self, tmp_path):
+        img = Image.new("RGBA", (1, 1), (42, 100, 200, 255))
+        path = tmp_path / "test.png"
+        img.save(path)
+
+        palette, pixels, info = mkdataset.read_image_as_text(path, max_colors=16)
+        assert len(palette) == 1
+        assert pixels == [[0]]
+
+    def test_jpeg_input(self, tmp_path):
+        img = Image.new("RGB", (2, 2), (255, 0, 0))
+        path = tmp_path / "test.jpg"
+        img.save(path)
+
+        palette, pixels, info = mkdataset.read_image_as_text(path, max_colors=16)
+        assert info["channels"] == "RGBA"
+        assert all(v[3] == 255 for v in palette.values())
 
 
 class TestDetectLanguage:
@@ -225,33 +395,89 @@ class TestShouldSkipFile:
     def test_skip_audio(self, tmp_path, config):
         f = tmp_path / "sound.wav"
         f.write_bytes(b"\x00" * 100)
-        assert mkdataset.should_skip_file(f, config, max_size=10_000_000) is True
+        assert mkdataset.should_skip_file(f, "", config, max_size=10_000_000) is True
 
     def test_skip_map(self, tmp_path, config):
         f = tmp_path / "bundle.map"
         f.write_text("{}")
-        assert mkdataset.should_skip_file(f, config, max_size=10_000_000) is True
+        assert mkdataset.should_skip_file(f, "", config, max_size=10_000_000) is True
 
     def test_skip_large_file(self, tmp_path, config):
         f = tmp_path / "big.py"
         f.write_text("x" * 100)
-        assert mkdataset.should_skip_file(f, config, max_size=50) is True
+        assert mkdataset.should_skip_file(f, "", config, max_size=50) is True
 
     def test_no_size_limit(self, tmp_path, config):
         f = tmp_path / "big.py"
         f.write_text("x" * 100)
-        assert mkdataset.should_skip_file(f, config, max_size=None) is False
+        assert mkdataset.should_skip_file(f, "", config, max_size=None) is False
 
     def test_allow_python(self, tmp_path, config):
         f = tmp_path / "hello.py"
         f.write_text("print('hello')\n")
-        assert mkdataset.should_skip_file(f, config, max_size=10_000_000) is False
+        assert mkdataset.should_skip_file(f, "", config, max_size=10_000_000) is False
 
     def test_allow_image(self, tmp_path, config):
         img = Image.new("RGBA", (2, 2), (255, 0, 0, 255))
         f = tmp_path / "sprite.png"
         img.save(f)
-        assert mkdataset.should_skip_file(f, config, max_size=10_000_000) is False
+        assert mkdataset.should_skip_file(f, "", config, max_size=10_000_000) is False
+
+    def test_skip_pattern_glob_recursive(self, tmp_path):
+        """skip_patterns with ** matches nested paths."""
+        config = {
+            "image_extensions": [],
+            "skip_extensions": [],
+            "skip_patterns": ["scripts/tsgen/**"],
+        }
+        f = tmp_path / "scripts" / "tsgen" / "bin" / "Parser.js"
+        f.parent.mkdir(parents=True)
+        f.write_text("code")
+        assert mkdataset.should_skip_file(f, "scripts/tsgen/bin/Parser.js", config, max_size=None) is True
+
+    def test_skip_pattern_glob_wildcard(self, tmp_path):
+        """skip_patterns with * matches filenames."""
+        config = {
+            "image_extensions": [],
+            "skip_extensions": [],
+            "skip_patterns": ["**/webpack*.config.js"],
+        }
+        f = tmp_path / "webpack.dist.config.js"
+        f.write_text("module.exports = {}")
+        assert mkdataset.should_skip_file(f, "plugins/spine/webpack.dist.config.js", config, max_size=None) is True
+
+    def test_skip_pattern_no_match(self, tmp_path):
+        """Files not matching skip_patterns are not skipped."""
+        config = {
+            "image_extensions": [],
+            "skip_extensions": [],
+            "skip_patterns": ["scripts/tsgen/**"],
+        }
+        f = tmp_path / "main.js"
+        f.write_text("code")
+        assert mkdataset.should_skip_file(f, "src/main.js", config, max_size=None) is False
+
+    def test_skip_pattern_empty(self, tmp_path):
+        """Empty skip_patterns skips nothing."""
+        config = {
+            "image_extensions": [],
+            "skip_extensions": [],
+            "skip_patterns": [],
+        }
+        f = tmp_path / "main.js"
+        f.write_text("code")
+        assert mkdataset.should_skip_file(f, "src/main.js", config, max_size=None) is False
+
+    def test_skip_dts_extension(self, tmp_path):
+        """'.d.ts' in skip_extensions is matched correctly."""
+        config = {
+            "image_extensions": [],
+            "skip_extensions": [".d.ts"],
+            "skip_patterns": [],
+        }
+        f = tmp_path / "spine-both.d.ts"
+        f.write_text("declare module spine {}")
+        assert mkdataset.should_skip_file(f, "runtime/spine-both.d.ts", config, max_size=None) is True
 
 
 class TestBuildTextEntry:
@@ -276,17 +502,17 @@ class TestBuildTextEntry:
         assert text == "print('hello')\n"
 
     def test_image_entry_with_header(self):
-        image_info = {"width": 16, "height": 16, "channels": "RGBA"}
+        image_info = {"width": 16, "height": 16, "channels": "RGBA", "num_colors": 4}
         text = mkdataset.build_text_entry(
-            content="[[[255, 0, 0, 255]]]",
+            content="sprite_palette = {0: [255, 0, 0, 255]}\nsprite = [[0]]",
             rel_path="project/sprite.png",
             language="image-data",
             image_info=image_info,
         )
         assert "### File: project/sprite.png" in text
         assert "### Language: image-data" in text
-        assert "### Image: width=16, height=16, channels=RGBA" in text
-        assert "[[[255, 0, 0, 255]]]" in text
+        assert "### Image: width=16, height=16, channels=RGBA, colors=4" in text
+        assert "sprite_palette" in text
 
 
 class TestCollectFiles:

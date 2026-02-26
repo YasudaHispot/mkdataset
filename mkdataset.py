@@ -8,8 +8,11 @@ Image files are converted to pixel array text representation.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import tomllib
+from collections import Counter
+import fnmatch
 from pathlib import Path
 
 from datasets import Dataset
@@ -81,26 +84,130 @@ def read_file_safe(path: Path) -> str:
         return path.read_text(encoding="latin-1")
 
 
-def read_image_as_text(path: Path) -> tuple[str, dict]:
-    """Convert an image to pixel array text representation.
+def sanitize_varname(name: str) -> str:
+    """Sanitize a string to be a valid Python identifier."""
+    varname = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+    if varname and varname[0].isdigit():
+        varname = "_" + varname
+    return varname
 
-    Returns (text, image_info) where image_info contains width, height, channels.
+
+def generate_unique_varnames(rel_paths: list[str]) -> dict[str, str]:
+    """Generate unique Python variable names from file paths.
+
+    Starts with the file stem. If duplicates exist, progressively prepends
+    parent directory components until all names are unique.
+    Returns a mapping of rel_path -> varname.
+    """
+    if not rel_paths:
+        return {}
+
+    # Build path parts for each rel_path (reversed: stem first, then parents)
+    parts_map: dict[str, list[str]] = {}
+    for rp in rel_paths:
+        p = Path(rp)
+        parts = [p.stem] + [part for part in reversed(p.parent.parts)]
+        parts_map[rp] = parts
+
+    # Start with depth=0 (stem only), increase for duplicates
+    depth: dict[str, int] = {rp: 0 for rp in rel_paths}
+
+    for _ in range(max(len(v) for v in parts_map.values())):
+        # Build current candidate names
+        candidates: dict[str, str] = {}
+        for rp in rel_paths:
+            parts = parts_map[rp]
+            d = depth[rp]
+            name_parts = list(reversed(parts[: d + 1]))
+            candidates[rp] = "_".join(name_parts)
+
+        # Find duplicates
+        name_counts = Counter(candidates.values())
+        duplicates = {name for name, count in name_counts.items() if count > 1}
+
+        if not duplicates:
+            return {rp: sanitize_varname(name) for rp, name in candidates.items()}
+
+        # Increase depth for paths that still have duplicates
+        for rp in rel_paths:
+            if candidates[rp] in duplicates and depth[rp] + 1 < len(parts_map[rp]):
+                depth[rp] += 1
+
+        # Check if no progress was made (all at max depth)
+        new_candidates = {}
+        for rp in rel_paths:
+            parts = parts_map[rp]
+            d = depth[rp]
+            name_parts = list(reversed(parts[: d + 1]))
+            new_candidates[rp] = "_".join(name_parts)
+        if new_candidates == candidates:
+            break
+
+    # Final result (may still have duplicates if paths are identical up to extension)
+    result: dict[str, str] = {}
+    for rp in rel_paths:
+        parts = parts_map[rp]
+        d = depth[rp]
+        name_parts = list(reversed(parts[: d + 1]))
+        result[rp] = sanitize_varname("_".join(name_parts))
+    return result
+
+
+def format_image_content(
+    palette: dict, pixels: list, rel_path: str, varname: str, image_info: dict
+) -> str:
+    """Format quantized image data as Python variable assignments with a comment."""
+    w = image_info["width"]
+    h = image_info["height"]
+    ch = image_info["channels"]
+    nc = image_info["num_colors"]
+    return (
+        f"# {rel_path} ({w}x{h}, {ch}, {nc} colors)\n"
+        f"{varname}_palette = {palette}\n"
+        f"{varname} = {pixels}"
+    )
+
+
+def read_image_as_text(path: Path, max_colors: int = 16) -> tuple[dict, list, dict]:
+    """Convert an image to quantized palette + indexed pixel representation.
+
+    All images are quantized to at most max_colors colors.
+    Returns (palette_dict, indexed_rows, image_info).
     """
     img = Image.open(path).convert("RGBA")
     width, height = img.size
-    pixels = list(img.tobytes())
-    # Reconstruct as RGBA tuples from flat byte array
-    pixel_tuples = [
-        (pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]) for i in range(0, len(pixels), 4)
-    ]
-    pixels = pixel_tuples
+
+    quantized = img.quantize(colors=max_colors, dither=Image.Dither.NONE)
+
+    # Extract RGBA palette
+    palette_raw = quantized.getpalette("RGBA")
+    pixel_indices = list(quantized.tobytes())
+
+    # Remap to consecutive 0-based indices
+    used_indices = sorted(set(pixel_indices))
+    remap = {old: new for new, old in enumerate(used_indices)}
+
+    palette_dict: dict[int, list[int]] = {}
+    for old_idx in used_indices:
+        new_idx = remap[old_idx]
+        base = old_idx * 4
+        palette_dict[new_idx] = list(palette_raw[base : base + 4])
+
+    # Build 2D indexed rows
     rows = []
     for y in range(height):
-        row = [list(pixels[y * width + x]) for x in range(width)]
+        offset = y * width
+        row = [remap[pixel_indices[offset + x]] for x in range(width)]
         rows.append(row)
-    text = str(rows)
-    image_info = {"width": width, "height": height, "channels": "RGBA"}
-    return text, image_info
+
+    num_colors = len(used_indices)
+    image_info = {
+        "width": width,
+        "height": height,
+        "channels": "RGBA",
+        "num_colors": num_colors,
+    }
+    return palette_dict, rows, image_info
 
 
 def detect_language(path: Path, config: dict) -> str:
@@ -172,13 +279,20 @@ def chunk_text(text: str, max_tokens: int, overlap_tokens: int, tokenizer=None) 
 # ---------------------------------------------------------------------------
 
 
-def should_skip_file(path: Path, config: dict, max_size: int | None) -> bool:
+def should_skip_file(path: Path, rel_path: str, config: dict, max_size: int | None) -> bool:
     """Determine if a file should be skipped."""
     ext = path.suffix.lower()
 
-    # Skip by extension
-    if ext in config.get("skip_extensions", []):
-        return True
+    # Skip by extension (supports compound extensions like .d.ts)
+    name_lower = path.name.lower()
+    for skip_ext in config.get("skip_extensions", []):
+        if name_lower.endswith(skip_ext):
+            return True
+
+    # Skip by path pattern (glob)
+    for pattern in config.get("skip_patterns", []):
+        if fnmatch.fnmatch(rel_path, pattern):
+            return True
 
     # Skip oversized files
     if max_size is not None:
@@ -205,7 +319,8 @@ def collect_files(source_dir: Path, config: dict, max_size: int | None) -> list[
     all_paths = sorted(p for p in source_dir.rglob("*") if p.is_file())
     files = []
     for path in tqdm(all_paths, desc="Scanning files"):
-        if should_skip_file(path, config, max_size):
+        rel_path = str(path.relative_to(source_dir))
+        if should_skip_file(path, rel_path, config, max_size):
             continue
 
         ext = path.suffix.lower()
@@ -239,11 +354,14 @@ def build_text_entry(
 
     lines = [f"### File: {rel_path}", f"### Language: {language}"]
     if image_info:
-        lines.append(
-            f"### Image: width={image_info['width']}, "
-            f"height={image_info['height']}, "
-            f"channels={image_info['channels']}"
-        )
+        parts = [
+            f"width={image_info['width']}",
+            f"height={image_info['height']}",
+            f"channels={image_info['channels']}",
+        ]
+        if "num_colors" in image_info:
+            parts.append(f"colors={image_info['num_colors']}")
+        lines.append(f"### Image: {', '.join(parts)}")
     lines.append("")
     lines.append(content)
     return "\n".join(lines)
@@ -282,6 +400,14 @@ def build_dataset(
         records["num_tokens"].append(num_tokens)
         records["project"].append(project)
 
+    # Pre-compute unique variable names for image files
+    image_rel_paths = [
+        str(p.relative_to(source_dir))
+        for p in files
+        if p.suffix.lower() in config.get("image_extensions", [])
+    ]
+    image_varnames = generate_unique_varnames(image_rel_paths)
+
     for path in tqdm(files, desc="Processing files"):
         rel_path = str(path.relative_to(source_dir))
         language = detect_language(path, config)
@@ -289,7 +415,11 @@ def build_dataset(
         project = extract_project_name(rel_path)
 
         if language == "image-data":
-            content, image_info = read_image_as_text(path)
+            max_colors = config.get("max_palette_colors", 16)
+            palette, pixels, image_info = read_image_as_text(path, max_colors)
+            content = format_image_content(
+                palette, pixels, rel_path, image_varnames[rel_path], image_info
+            )
             text = build_text_entry(
                 content=content,
                 rel_path=rel_path,
@@ -361,7 +491,9 @@ def dry_run(source_dir: Path, config: dict, max_size: int | None, tokenizer=None
         project = extract_project_name(rel_path)
 
         if language == "image-data":
-            content, _ = read_image_as_text(path)
+            max_colors = config.get("max_palette_colors", 16)
+            palette, pixels, image_info = read_image_as_text(path, max_colors)
+            content = format_image_content(palette, pixels, rel_path, "img", image_info)
         else:
             content = read_file_safe(path)
         ntokens = count_tokens(content, tokenizer)
