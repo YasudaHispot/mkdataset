@@ -424,7 +424,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Max file size in bytes (default: unlimited)",
     )
-    parser.add_argument("--no-header", action="store_true", help="Don't add headers to text column")
+    parser.add_argument("--with-header", action="store_true", help="Add headers to text column")
     parser.add_argument(
         "--dry-run", action="store_true", help="Show file listing without generating output"
     )
@@ -461,7 +461,7 @@ def main(argv: list[str] | None = None) -> None:
         print("No files to process. Exiting.")
         return
 
-    add_header = not args.no_header
+    add_header = args.with_header
     ds = build_dataset(files, source_dir, config, add_header=add_header, tokenizer=tokenizer)
 
     print(f"Writing dataset to {output_dir}...")

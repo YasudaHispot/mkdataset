@@ -406,6 +406,73 @@ class TestWriteAndLoadDataset:
         assert set(loaded.column_names) == set(ds.column_names)
 
 
+class TestParseArgs:
+    def test_defaults(self):
+        args = mkdataset.parse_args([])
+        assert args.source is None
+        assert args.output == "./output"
+        assert args.config == "./config.toml"
+        assert args.max_file_size is None
+        assert args.with_header is False
+        assert args.dry_run is False
+
+    def test_source_short(self):
+        args = mkdataset.parse_args(["-s", "/data/src"])
+        assert args.source == "/data/src"
+
+    def test_source_long(self):
+        args = mkdataset.parse_args(["--source", "/data/src"])
+        assert args.source == "/data/src"
+
+    def test_output_short(self):
+        args = mkdataset.parse_args(["-o", "/data/out"])
+        assert args.output == "/data/out"
+
+    def test_output_long(self):
+        args = mkdataset.parse_args(["--output", "/data/out"])
+        assert args.output == "/data/out"
+
+    def test_config_short(self):
+        args = mkdataset.parse_args(["-c", "my.toml"])
+        assert args.config == "my.toml"
+
+    def test_config_long(self):
+        args = mkdataset.parse_args(["--config", "my.toml"])
+        assert args.config == "my.toml"
+
+    def test_max_file_size(self):
+        args = mkdataset.parse_args(["--max-file-size", "1024"])
+        assert args.max_file_size == 1024
+
+    def test_with_header(self):
+        args = mkdataset.parse_args(["--with-header"])
+        assert args.with_header is True
+
+    def test_default_no_header(self):
+        args = mkdataset.parse_args([])
+        assert args.with_header is False
+
+    def test_dry_run(self):
+        args = mkdataset.parse_args(["--dry-run"])
+        assert args.dry_run is True
+
+    def test_all_options(self):
+        args = mkdataset.parse_args([
+            "-s", "/src",
+            "-o", "/out",
+            "-c", "c.toml",
+            "--max-file-size", "500",
+            "--with-header",
+            "--dry-run",
+        ])
+        assert args.source == "/src"
+        assert args.output == "/out"
+        assert args.config == "c.toml"
+        assert args.max_file_size == 500
+        assert args.with_header is True
+        assert args.dry_run is True
+
+
 class TestDryRun:
     def test_dry_run(self, tmp_source, config, capsys):
         mkdataset.dry_run(tmp_source, config, max_size=10_000_000)

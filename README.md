@@ -95,7 +95,7 @@ By project:
 | `--output` | `-o` | `./output` | 出力ディレクトリのパス |
 | `--config` | `-c` | `./config.toml` | 設定ファイルのパス |
 | `--max-file-size` | | 無制限 | 最大ファイルサイズ（バイト単位） |
-| `--no-header` | | ― | text カラムにヘッダーを付けない |
+| `--with-header` | | ― | text カラムにヘッダー（ファイルパス・言語）を付与 |
 | `--dry-run` | | ― | 出力せずファイル一覧と統計を表示 |
 
 ### 使用例
@@ -107,8 +107,8 @@ uv run mkdataset -s ./my_code -o ./my_dataset
 # ファイルサイズ上限を 5MB に変更
 uv run mkdataset --max-file-size 5242880
 
-# ヘッダーなしで生成（ファイル内容のみ）
-uv run mkdataset --no-header
+# ヘッダー付きで生成（ファイルパス・言語情報を付与）
+uv run mkdataset --with-header
 
 # 別の設定ファイルを使用
 uv run mkdataset -c ./custom_config.toml
@@ -194,7 +194,7 @@ skip_extensions = [
 
 | カラム | 型 | 説明 |
 |--------|------|------|
-| `text` | string | ヘッダー + ファイル内容（LLM が学習する本文） |
+| `text` | string | ファイル内容（`--with-header` 指定時はヘッダー付き） |
 | `file_path` | string | source/ からの相対パス（チャンク分割時は `#chunk-N` 付き） |
 | `language` | string | 検出言語（`python`, `javascript`, `image-data` 等） |
 | `size_bytes` | int64 | 元ファイルのサイズ（バイト） |
@@ -204,34 +204,33 @@ skip_extensions = [
 
 ### text カラムのフォーマット
 
-テキストファイルの場合:
+デフォルトではファイル内容がそのまま格納されます。
 
 ```
-### File: PacMan-main/pacman.py
-### Language: python
-
-import sys
-from model.board_definition import BoardDefinition
+const express = require('express');
+const app = express();
 ...
 ```
 
-画像ファイルの場合:
+`--with-header` を指定すると、ファイルパスと言語のヘッダーが付与されます。
 
 ```
-### File: PacMan-main/assets/ghost_images/blinky/down1.png
-### Language: image-data
-### Image: width=28, height=28, channels=RGBA
-
-[[[255, 0, 0, 255], [255, 0, 0, 255], ...], ...]
-```
-
-チャンク分割されたファイルの場合:
-
-```
-### File: phaser-3.90.0/src/input/InputPlugin.js#chunk-2
+### File: my-project/src/app.js
 ### Language: javascript
 
-... (前のチャンクとオーバーラップあり)
+const express = require('express');
+const app = express();
+...
+```
+
+画像ファイル（`--with-header` 時）:
+
+```
+### File: my-project/assets/icon.png
+### Language: image-data
+### Image: width=16, height=16, channels=RGBA
+
+[[[255, 0, 0, 255], [255, 0, 0, 255], ...], ...]
 ```
 
 ### データセットの読み込み
@@ -239,7 +238,12 @@ from model.board_definition import BoardDefinition
 ```python
 from datasets import load_dataset
 
+# ディレクトリ指定
 ds = load_dataset("./output", split="train")
+
+# ファイル指定
+ds = load_dataset("parquet", data_files="output/train-00000-of-00001.parquet", split="train")
+
 print(ds)
 # Dataset({
 #     features: ['text', 'file_path', 'language', 'size_bytes', 'num_lines', 'num_tokens', 'project'],
